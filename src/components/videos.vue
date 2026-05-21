@@ -13,6 +13,23 @@ function detectMime(bytes: Uint8Array): string {
   return 'image/jpeg'
 }
 
+function renderBlob(bytes: Uint8Array) {
+  try {
+    const blob = new Blob([bytes], { type: detectMime(bytes) })
+    const img = new Image()
+    img.onload = () => {
+      if (!canvas.value) return;
+      if (canvas.value.width !== img.naturalWidth || canvas.value.height !== img.naturalHeight) {
+        canvas.value.width = img.naturalWidth
+        canvas.value.height = img.naturalHeight
+      }
+      ctx.drawImage(img, 0, 0)
+      URL.revokeObjectURL(img.src)
+    }
+    img.src = URL.createObjectURL(blob)
+  } catch {}
+}
+
 function renderFrame(b64: string) {
   if (!b64) return
   try {
@@ -25,53 +42,37 @@ function renderFrame(b64: string) {
   } catch {}
 }
 
-function renderBlob(bytes: Uint8Array) {
-  try {
-    const blob = new Blob([bytes], { type: detectMime(bytes) })
-    const img = new Image()
-    img.onload = () => {
-      if (canvas.value!.width !== img.naturalWidth || canvas.value!.height !== img.naturalHeight) {
-        canvas.value!.width = img.naturalWidth
-        canvas.value!.height = img.naturalHeight
-      }
-      ctx.drawImage(img, 0, 0)
-      URL.revokeObjectURL(img.src)
+function processJsonMessage(data: any) {
+  if (data.frame) {
+    renderFrame(data.frame)
+  }
+  if (data.type === 'results') {
+    detectResults.value = data.objects
+  }
+}
+
+function handleWsMessage(event: MessageEvent) {
+  if (event.data instanceof ArrayBuffer) {
+    renderBlob(new Uint8Array(event.data))
+    return
+  }
+
+  if (typeof event.data === 'string') {
+    try {
+      const data = JSON.parse(event.data)
+      processJsonMessage(data)
+    } catch (e) {
+      console.error("Failed to parse websocket message", e)
     }
-    img.src = URL.createObjectURL(blob)
-  } catch {}
+  }
 }
 
 onMounted(() => {
   ctx = canvas.value!.getContext('2d')!
 
   ws = new WebSocket('ws://127.0.0.1:8000/ws')
-  // 核心改动：指定接收二进制数据，这对于视频数据传输至关重要
-  ws.binaryType = 'arraybuffer' 
-  
-  ws.onmessage = (event) => {
-    // 方案 1：最高效的二进制视频帧/图片流（推荐服务端直接发二进制）
-    if (event.data instanceof ArrayBuffer) {
-      renderBlob(new Uint8Array(event.data))
-      return
-    }
-
-    // 方案 2：向下兼容 JSON + Base64 控制帧（目前你的方式）
-    if (typeof event.data === 'string') {
-      try {
-        const data = JSON.parse(event.data)
-        if (data.frame) {
-          renderFrame(data.frame)
-        }
-
-        // 专门处理标注结果等元数据
-        if (data.type === 'results') {
-          detectResults.value = data.objects
-        }
-      } catch (e) {
-        console.error("Failed to parse websocket message", e)
-      }
-    }
-  }
+  ws.binaryType = 'arraybuffer'
+  ws.onmessage = handleWsMessage
 })
 
 onUnmounted(() => {
@@ -82,50 +83,124 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="video-container">
-    <canvas ref="canvas" width="1920" height="1080"></canvas>
-    <div class="overlay" v-if="detectResults">
-      <h3>识别结果</h3>
-      <ul>
+  <div class="layout-container">
+    <div class="video-section">
+      <canvas ref="canvas" width="1920" height="1080"></canvas>
+    </div>
+    <div class="info-section">
+      <h3>识别附加信息</h3>
+      <ul v-if="detectResults">
         <li v-for="(count, name) in detectResults" :key="name">
-          {{ name }}: {{ count }}
+          <span class="label">{{ name }}</span>
+          <span class="value">{{ count }}</span>
         </li>
       </ul>
+      <div v-else class="no-data">等待数据接入...</div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.video-container {
-  position: relative;
-  display: inline-block;
+.layout-container {
+  display: flex;
+  flex-direction: row;
+  gap: 20px;
+  padding: 20px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 90vh;
+  //margin: 5vh auto 0; /* 这里加上了 5vh 的顶部外边距，把它往下推，使其视觉上居中 */
 }
-.overlay {
-  position: absolute;
-  top: 20px;
-  left: 20px;
-  background: rgba(0, 0, 0, 0.6);
-  color: white;
-  padding: 15px;
+
+.video-section {
+  flex: 0 0 70%; /* 视频占据 70% 宽度 */
+  background-color: #1e1e1e;
   border-radius: 8px;
-  pointer-events: none;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
-.overlay h3 {
-  margin: 0 0 10px 0;
-  font-size: 18px;
+
+canvas {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
 }
-.overlay ul {
+
+.info-section {
+  flex: 1; /* 信息框占据剩余 30% 宽度 */
+  background: #ffffff;
+  color: #333333;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+}
+
+/* 适配深色模式 */
+@media (prefers-color-scheme: dark) {
+  .info-section {
+    background: #2a2a2a;
+    color: #eeeeee;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+  }
+}
+
+.info-section h3 {
+  margin-top: 0;
+  margin-bottom: 20px;
+  font-size: 20px;
+  border-bottom: 2px solid #e0e0e0;
+  padding-bottom: 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .info-section h3 {
+    border-bottom: 2px solid #444444;
+  }
+}
+
+.info-section ul {
   list-style: none;
   margin: 0;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
-.overlay li {
+
+.info-section li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: rgba(128, 128, 128, 0.1);
+  padding: 10px 15px;
+  border-radius: 6px;
   font-size: 16px;
-  margin-bottom: 5px;
 }
-canvas {
-  max-width: 100%;
-  height: auto;
-  display: block;
+
+.label {
+  font-weight: bold;
+  text-transform: capitalize;
+}
+
+.value {
+  background: #4caf50;
+  color: white;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.no-data {
+  color: #888888;
+  font-style: italic;
+  text-align: center;
+  margin-top: 20px;
 }
 </style>
